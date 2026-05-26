@@ -25,7 +25,7 @@ const config = {
     baudRate: getNumberEnv("SERIAL_BAUD_RATE", 9600),
     dataBits: getNumberEnv("SERIAL_DATA_BITS", 8),
     stopBits: getNumberEnv("SERIAL_STOP_BITS", 1),
-    parity: getStringEnv("SERIAL_PARITY", "none"),
+    parity: getStringEnv("SERIAL_PARITY", "even"), // MEI Cashflow SC / EBDS requires even parity
   },
   serialTimeoutMs: getNumberEnv("SERIAL_TIMEOUT_MS", 1500),
   pollIntervalMs: getNumberEnv("POLL_INTERVAL_MS", 300),
