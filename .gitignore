@@ -1,12 +1,6 @@
-# Developer tooling and local docs
-.claude/
-.tasks/
-CLAUDE.md
-plan.md
-task_compltition.md
-
-# Manual test UI (local only)
-test-ui.html
+# Build
+dist/
+build/
 
 # Logs
 logs
@@ -149,3 +143,4 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
