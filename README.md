@@ -1,280 +1,151 @@
-# SCI8327R Bill Acceptor — RS232 + WebSocket Server
+# bill-acceptor-ts
 
-Node.js service that bridges a **SCI8327R / SCL8327R** bill acceptor over RS232 to a JSON WebSocket API.  
-Clients send commands as JSON, receive JSON responses, and get device events broadcast in real time.
+Node.js/TypeScript server that connects an MEI SCL8327R bill acceptor to a WebSocket API. It polls the device over RS232 using the EBDS protocol and lets you control it with JSON over WebSocket. 
 
-## Requirements
 
-- Node.js 18+
-- SCI8327R or SCL8327R bill acceptor connected via RS232/USB-serial adapter
+## Setup
 
-## Installation
+Install dependences 
 
-```bash
-cp .env.example .env   # copy config template, then edit SERIAL_PORT and WS_HOST
+```
 npm install
-npm start
 ```
 
-## Configuration
+Change `.env.example` into `.env`. Open `.env` and set `SERIAL_PORT` to your port. On Windows, check Device Manager under "Ports (COM & LPT)". On Linux it's usually `/dev/ttyUSB0` or `/dev/ttyACM0` and so on.
 
-All settings live in `.env`. Safe defaults are in `.env.example`.
+If you're testing from a browser or Postman on the same machine and you're on Windows, also set `WS_HOST=0.0.0.0`. The default `localhost` resolves to IPv6 (::1) on Windows, so any IPv4 client gets ECONNREFUSED. 
 
-| Variable | Default | Description |
+```
+npm run dev        
+npm run typecheck  
+```
+If you need to build and run project follow:
+```
+npm run build      
+npm start         
+```
+
+
+## Connecting
+
+By using wscat:
+
+```
+npm install -g wscat
+wscat -c ws://localhost:8080
+```
+
+
+![wscat test session](./images/wscat_test.png)
+
+By using Postman:
+The request: 
+```json
+{"device":"BILL_ACCEPTOR","method":"AUTOSTACK","id":"1","params":{"enabled":false}}
+{"device":"BILL_ACCEPTOR","method":"AUTOSTACK","id":"1","params":{"enabled":true}}
+{"device":"BILL_ACCEPTOR","method":"DISABLE","id":"1"}
+```
+Responce:
+
+![postman test session](./images/postman_test.png)
+
+Available methods:
+
+- `OPEN` opens the serial port and verifies the device responds
+- `CLOSE` closes the port and stops the polling loop
+- `STATUS` returns current state; works whether connected or not
+- `CAPTURE` starts accepting bills
+- `ENABLE` same as CAPTURE
+- `DISABLE` stops accepting bills
+- `STACK` takes the bill waiting in escrow and stores it in the cash box
+- `RETURN` sends the escrowed bill back out
+- `AUTOSTACK` takes `params: {"enabled": true/false}` and auto-stacks every bill without waiting for a command
+
+`STACK` and `RETURN` only work when a bill is actually in escrow. You get `NO_ESCROW` otherwise.
+
+
+## Project layout
+
+![project layout](./images/project_layout.png)
+
+
+
+
+## Config
+
+All settings in `.env`. All have defaults so the server starts without one.
+
+| Variable | Default | Notes |
 |---|---|---|
-| `WS_HOST` | `localhost` | WebSocket bind address. Use `0.0.0.0` on Windows to accept connections from browsers and Postman. |
-| `WS_PORT` | `8080` | WebSocket port |
-| `SERIAL_PORT` | `COM3` | RS232 port. Windows: `COM1`, `COM2`… Linux: `/dev/ttyUSB0`, `/dev/ttyACM0` |
-| `SERIAL_BAUD_RATE` | `9600` | Baud rate for SCI8327R/SCL8327R |
-| `SERIAL_DATA_BITS` | `8` | Data bits |
-| `SERIAL_STOP_BITS` | `1` | Stop bits |
-| `SERIAL_PARITY` | `none` | Parity |
-| `SERIAL_TIMEOUT_MS` | `1500` | Command response timeout in milliseconds |
-| `POLL_INTERVAL_MS` | `300` | Status poll interval in milliseconds |
+| `SERIAL_PORT` | `COM3` | change this to your port |
+| `SERIAL_BAUD_RATE` | `9600` | EBDS spec, leave it |
+| `SERIAL_PARITY` | `even` | required by EBDS, leave it |
+| `WS_HOST` | `localhost` | set `0.0.0.0` on Windows |
+| `WS_PORT` | `8080` | |
+| `SERIAL_TIMEOUT_MS` | `1500` | how long to wait for a device response |
+| `POLL_INTERVAL_MS` | `200` | polling frequency in ms |
 
-> **Windows note:** Node.js resolves `localhost` to `::1` (IPv6 only), causing `ECONNREFUSED` for IPv4 clients.  
-> Set `WS_HOST=0.0.0.0` in `.env` when testing from a browser or Postman on Windows.
+## Additional information from Google:
+### How EBDS polling works
 
-## Running
+The acceptor doesn't push notifications. The server sends a STATUS frame (command byte 0x10) every 200ms and reads the response. If a bill gets inserted, the state change shows up in the next poll response. You send STACK (0x41) or RETURN (0x42) the same way.
 
-```bash
-npm start              # start the WebSocket server
-npm run test-client    # run sequential integration test (server must be running)
-```
+Every frame starts with STX (0x02), then a LENGTH byte (total frame size), then the command/data bytes, and ends with a BCC checksum, which is the XOR of all bytes from LENGTH through the last data byte. The ACK bit in the frame header alternates 0/1 with each successful exchange, so the device can detect if you resent a frame.
 
-Server listens at `ws://localhost:8080` by default.
+The server handles all of this internally. You just send JSON.
 
----
 
-## WebSocket API
+### General Frame Anatomy
 
-### Connection
+Every standard EBDS message is structured as follows:
 
-On every new connection the server sends an unsolicited `INFO` message:
-
-```json
-{
-  "type": "INFO",
-  "device": "BILL_ACCEPTOR",
-  "message": "Connected to bill acceptor server",
-  "status": {
-    "connected": false,
-    "mode": "CLOSED",
-    "enabled": false,
-    "autoStack": false,
-    "billInEscrow": false,
-    "serialPort": "COM3",
-    "lastRawResponse": null
-  },
-  "ts": "2026-05-14T09:37:00.924Z"
-}
-```
-
-### Request format
-
-```json
-{"device": "BILL_ACCEPTOR", "method": "OPEN", "id": "req-1", "params": {}}
-```
-
-| Field | Required | Description |
-|---|---|---|
-| `device` | Yes | Must be `BILL_ACCEPTOR` |
-| `method` | Yes | Command name (see table below) |
-| `id` | Yes | Arbitrary request ID; echoed back in every response |
-| `params` | No | Extra parameters (required by `AUTOSTACK`) |
-
-Validation order: valid JSON → `device === "BILL_ACCEPTOR"` → `id` present → known `method` → method-specific params.  
-**The `id` is returned in every error response** as long as the message was valid JSON, even when `device`, `method`, or `params` fail validation.
-
-### Success response
-
-```json
-{
-  "id": "req-1",
-  "device": "BILL_ACCEPTOR",
-  "method": "STATUS",
-  "ok": true,
-  "result": {
-    "connected": false,
-    "mode": "CLOSED",
-    "enabled": false,
-    "autoStack": false,
-    "billInEscrow": false,
-    "serialPort": "COM3",
-    "lastRawResponse": null
-  },
-  "ts": "2026-05-14T09:37:01.143Z"
-}
-```
-
-### Error response
-
-```json
-{
-  "id": "req-1",
-  "device": "BILL_ACCEPTOR",
-  "method": "OPEN",
-  "ok": false,
-  "error": {
-    "code": "PORT_NOT_FOUND",
-    "message": "No such file or directory, cannot open COM3",
-    "details": null
-  },
-  "ts": "2026-05-14T09:37:06.569Z"
-}
-```
+| Field | Hex Value / Type | Description |
+| :--- | :--- | :--- |
+| **STX** | `0x02` | Start of text/frame marker. |
+| **LENGTH** | `number` | Total number of bytes in the entire frame. |
+| **CMD / MSG_TYPE** | `byte` | Command or message type byte (includes ACK toggle bit). |
+| **DATA** | `bytes[]` | Optional payload bytes (e.g., currency enable masks). |
+| **ETX** | `0x03` | End of text/frame marker. |
+| **CHK** | `byte` | Checksum. Calculated via bitwise **XOR** of all bytes between STX and CHK (from `LENGTH` through `ETX`). |
 
 ---
 
-## Commands
+### Device Response Frame Layout (Standard 11-Byte Buffer)
 
-| Command | Description |
-|---|---|
-| `OPEN` | Open RS232 port and verify the device responds. Required before any other command. |
-| `CLOSE` | Stop polling, close serial port, release COM port. |
-| `STATUS` | Return in-memory device state. Never throws — works whether connected or not. |
-| `CAPTURE` | Enable bill acceptance mode. Device waits for a bill to be inserted. |
-| `STACK` | Accept bill in escrow into the cassette. Throws `NO_ESCROW` if no bill is waiting. |
-| `RETURN` | Return bill in escrow to the user. Throws `NO_ESCROW` if no bill is waiting. |
-| `AUTOSTACK` | Set auto-accept mode. `params.enabled` must be a boolean. When `true`, escrow bills are automatically stacked without requiring a `STACK` command. |
-| `ENABLE` | Allow bill acceptance. |
-| `DISABLE` | Deny bill acceptance. |
+When decoding raw data streams from the bill acceptor, the device typically replies with an 11-byte frame (`LENGTH = 0x0B`). The system parses this buffer index by index:
 
-### AUTOSTACK example
 
-```json
-{"device": "BILL_ACCEPTOR", "method": "AUTOSTACK", "id": "as-1", "params": {"enabled": true}}
-```
-
----
-
-## Device Events
-
-Events are **broadcast to all connected clients** when device state changes.  
-They are never a direct response to a command — they come at any time.
-
-```json
-{"type": "EVENT", "device": "BILL_ACCEPTOR", "event": "ESCROW", "data": {}, "ts": "..."}
-```
-
-| Event | Trigger |
-|---|---|
-| `CONNECTED` | Device opened and responding |
-| `DISCONNECTED` | Serial port closed or cable unplugged |
-| `ESCROW` | Bill inserted and waiting for `STACK` or `RETURN` |
-| `STACKING` | Bill is moving into the cassette |
-| `STACKED` | Bill accepted into the cassette |
-| `RETURNING` | Bill is moving back to the user |
-| `RETURNED` | Bill returned to the user |
-| `REJECTED` | Bill rejected by the device |
-| `ERROR` | Device or serial error |
+| Index | Field Name | Description |
+| :---: | :--- | :--- |
+| **`[0]`** | `STX` | Start of frame (`0x02`) |
+| **`[1]`** | `LENGTH` | Total frame size (`0x0B`) |
+| **`[2]`** | `MSG_TYPE` | Message routing identifier |
+| **`[3]`** | `DEV_TYPE` | Device classification code |
+| **`[4]`** | `DOC_TYPE` | Denomination code (e.g., `0` = no bill, `5` = \$5, etc.) |
+| **`[5]`** | `STATUS_0` | **Bill movement flags** (Bitmask) |
+| **`[6]`** | `STATUS_1` | **Hardware error flags** (Bitmask) |
+| **`[7]`** | `STATUS_2` | Reserved for future firmware flags |
+| **`[8]`** | `STATUS_3` | Reserved for future firmware flags |
+| **`[9]`** | `ETX` | End of frame (`0x03`) |
+| **`[10]`**| `CHK` | Block Check Character (XOR Checksum) |
 
 ---
 
-## Error Codes
+### Bitmask Diagnostic Maps
 
-| Code | Cause |
-|---|---|
-| `INVALID_JSON` | Message could not be parsed as JSON |
-| `WRONG_DEVICE` | `device` field is not `BILL_ACCEPTOR` |
-| `MISSING_ID` | `id` field not present |
-| `UNKNOWN_METHOD` | `method` not in the allowed list |
-| `INVALID_PARAMS` | Method-specific params invalid (e.g. `AUTOSTACK` without boolean `enabled`) |
-| `PORT_NOT_FOUND` | Serial port path does not exist |
-| `DEVICE_NOT_RESPONDING` | No response within `SERIAL_TIMEOUT_MS` |
-| `DEVICE_DISCONNECTED` | Command sent while not connected |
-| `NO_ESCROW` | `STACK` or `RETURN` sent with no bill in escrow |
-| `BILL_JAMMED` | Bill jammed in the transport path |
-| `CASSETTE_FULL` | Bill cassette is at capacity |
-| `CASSETTE_REMOVED` | Cassette is missing |
-| `DEVICE_ERROR` | Generic hardware or protocol error |
-| `INTERNAL_ERROR` | Unexpected software error |
+Because statuses are sent as bitmasks, you must check individual bits to determine the state of the machine or the bill.
 
----
+#### `STATUS_0`: Bill Movement States
+* **Bit 0 (`0x01`):** Idling
+* **Bit 1 (`0x02`):** Accepting
+* **Bit 2 (`0x04`):** Escrowed
+* **Bit 3 (`0x08`):** Stacking
+* **Bit 4 (`0x10`):** Stacked
+* **Bit 5 (`0x20`):** Returning
+* **Bit 6 (`0x40`):** Returned
+* **Bit 7 (`0x80`):** Rejected
 
-## State Machine
-
-```
-CLOSED ──(OPEN)──▶ OPENING ──▶ OPEN ──(CAPTURE)──▶ CAPTURE
-                                                        │
-                                          bill inserted │
-                                                        ▼
-                                                     ESCROW
-                                                    /       \
-                                             (STACK)         (RETURN)
-                                                │                │
-                                           STACKING          RETURNING
-                                                │                │
-                                           CAPTURE           CAPTURE
-```
-
-- `STACK` / `RETURN` require `billInEscrow === true`, otherwise throw `NO_ESCROW`
-- `CAPTURE`, `ENABLE`, `DISABLE`, `STACK`, `RETURN` throw `DEVICE_DISCONNECTED` when not connected
-- `STATUS` and `AUTOSTACK` work in any state
-- Serial disconnect sets `mode = "CLOSED"`, emits `DISCONNECTED`, stops polling — server keeps running
-
----
-
-## Test Client Output
-
-`npm run test-client` connects to the running server and sends commands sequentially.  
-Sample output with **no physical device connected** (COM3 absent):
-
-```
-Connected to ws://localhost:8080
-
-<< recv: {"type":"INFO","device":"BILL_ACCEPTOR","message":"Connected to bill acceptor server",
-  "status":{"connected":false,"mode":"CLOSED","enabled":false,"autoStack":false,
-  "billInEscrow":false,"serialPort":"COM3","lastRawResponse":null},"ts":"..."}
-
->> sent: {"device":"BILL_ACCEPTOR","method":"STATUS","id":"test-1"}
-<< recv: {"id":"test-1","device":"BILL_ACCEPTOR","method":"STATUS","ok":true,
-  "result":{"connected":false,"mode":"CLOSED","enabled":false,"autoStack":false,
-  "billInEscrow":false,"serialPort":"COM3","lastRawResponse":null},"ts":"..."}
-
->> sent: {"device":"BILL_ACCEPTOR","method":"OPEN","id":"test-2"}
-<< recv: {"id":"test-2","device":"BILL_ACCEPTOR","method":"OPEN","ok":false,
-  "error":{"code":"DEVICE_ERROR","message":"Opening COM3: Unknown error code 121","details":null},"ts":"..."}
-
->> sent: {"device":"BILL_ACCEPTOR","method":"STATUS","id":"test-3"}
-<< recv: {"id":"test-3","device":"BILL_ACCEPTOR","method":"STATUS","ok":true,
-  "result":{"connected":false,"mode":"CLOSED",...},"ts":"..."}
-
->> sent: {"device":"BILL_ACCEPTOR","method":"CAPTURE","id":"test-4"}
-<< recv: {"id":"test-4","device":"BILL_ACCEPTOR","method":"CAPTURE","ok":false,
-  "error":{"code":"DEVICE_DISCONNECTED","message":"Device is not connected","details":null},"ts":"..."}
-
->> sent: {"device":"BILL_ACCEPTOR","method":"STACK","id":"test-5"}
-<< recv: {"id":"test-5","device":"BILL_ACCEPTOR","method":"STACK","ok":false,
-  "error":{"code":"DEVICE_DISCONNECTED","message":"Device is not connected","details":null},"ts":"..."}
-
->> sent: {"device":"BILL_ACCEPTOR","method":"AUTOSTACK","id":"test-6","params":{"enabled":true}}
-<< recv: {"id":"test-6","device":"BILL_ACCEPTOR","method":"AUTOSTACK","ok":true,
-  "result":{"connected":false,"mode":"CLOSED","enabled":false,"autoStack":true,...},"ts":"..."}
-
->> sent: {"device":"BILL_ACCEPTOR","method":"STATUS","id":"test-7"}
-<< recv: {"id":"test-7","device":"BILL_ACCEPTOR","method":"STATUS","ok":true,
-  "result":{"connected":false,"mode":"CLOSED","enabled":false,"autoStack":true,...},"ts":"..."}
-
-All tests complete. Closing connection.
-Connection closed.
-```
-
-**Expected behavior without hardware:**
-- `STATUS` always returns `ok: true` with current in-memory state
-- `OPEN` fails with `DEVICE_ERROR` when COM port is absent or locked
-- `CAPTURE` / `STACK` fail with `DEVICE_DISCONNECTED` (not connected)
-- `AUTOSTACK` always succeeds — it sets an in-memory flag regardless of connection state
-- Every response echoes the original `id` field
-
----
-
-## RS232 Protocol Status
-
-`src/protocol.js` contains **placeholder** `Buffer.from([])` for all SCI8327R/SCL8327R command bytes.  
-`buildCommand()` throws `DEVICE_ERROR` for any command until real byte frames are filled in from the official manual.  
-`parseDeviceResponse()` is a stub that returns `{ event: null, error: null, deviceStatus: {} }`.
-
-**Do not guess byte frames.** Fill in real values only after the official SCI8327R/SCL8327R protocol manual is available.
-
-Once the real protocol is implemented, hardware errors returned by `parseDeviceResponse()` will propagate as `ok: false` error responses to clients (the throw path in `sendDeviceCommand()` is already wired up).
+#### `STATUS_1`: Hardware Error States
+* **Bit 2 (`0x04`):** Jammed
+* **Bit 3 (`0x08`):** Cassette Full
+* **Bit 4 (`0x10`):** Cassette Removed
